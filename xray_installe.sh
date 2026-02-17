@@ -100,10 +100,10 @@ cat > /etc/xray/config.json << EOF
   },
   "inbounds": [
     {
-      "port": 8443,
+      "port": 443,
       "protocol": "vless",
       "settings": {
-        "clients": [{"id": "$uuid"}],
+        "clients": [{"id": "00000400-0000-0300-0200-000000000001"}],
         "decryption": "none"
       },
       "streamSettings": {
@@ -119,7 +119,7 @@ cat > /etc/xray/config.json << EOF
           "cipherSuites": "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256"
         },
         "wsSettings": {
-          "path": "/vless-tls",
+          "path": "/kighmu",
           "host": "$DOMAIN"
         }
       }
@@ -205,5 +205,5 @@ fi
 
 echo "Installation complète terminée."
 echo "Domaine : $DOMAIN"
-echo "UUID VLESS TLS : $uuid3"
+echo "UUID VLESS TLS : 00000400-0000-0300-0200-000000000001"
 echo "Mot de passe Trojan (WS TLS 8443) : $uuid5"
