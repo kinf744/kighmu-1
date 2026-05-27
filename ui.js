@@ -11,6 +11,7 @@ import readline from 'readline';
 import fs       from 'fs';
 import path     from 'path';
 import os       from 'os';
+import crypto   from 'crypto';
 import { execSync } from 'child_process';
 
 import { PROVIDERS } from './providers.js';
@@ -155,19 +156,9 @@ function printShortHeader(provider, model) {
 // WIZARD PERMISSIONS & API KEY
 // ══════════════════════════════════════════════════════
 async function runSetupWizard(rl) {
-  const ask = (q) => new Promise(r =>
-    rl.question(`  ${A.bold}${A.brightCyan}?${A.reset} ${A.bold}${q}${A.reset} `, r)
-  );
-  const askHidden = (q) => new Promise(r => {
-    process.stdout.write(`  ${A.bold}${A.brightCyan}?${A.reset} ${A.bold}${q}${A.reset} `);
-    // readline ne supporte pas le masquage natif, on informe l'user
-    rl.question('', r);
-  });
-  const confirm = (q) => new Promise(r =>
-    rl.question(`  ${A.bold}${A.brightYellow}?${A.reset} ${q} ${A.dim}(y/n)${A.reset} `, ans =>
-      r(ans.trim().toLowerCase() === 'y' || ans.trim().toLowerCase() === 'yes' || ans.trim() === '')
-    )
-  );
+  const ask       = makeBoxedAsk(rl);
+  const askHidden = (q) => makeBoxedAsk(rl)(q, { secret: true });
+  const confirm   = makeBoxedConfirm(rl);
 
   process.stdout.write(A.clearScreen);
   printHeader('mistral', 'setup');
@@ -274,9 +265,7 @@ async function runSetupWizard(rl) {
   cfg._setupDone = true;
   saveConfig(cfg);
 
-  await new Promise(r => {
-    rl.question(`\n  ${c.dim('Appuie sur Entrée pour démarrer le chat...')} `, r);
-  });
+  await makeBoxedAsk(rl)('Appuie sur Entrée pour démarrer le chat', { hint: '' });
 
   return cfg;
 }
@@ -430,6 +419,7 @@ function printHelp() {
   const cmds = [
     ['/model [id]',    'Changer de modèle IA'],
     ['/provider [p]',  'Changer de provider (mistral|groq|openrouter)'],
+    ['/cle-api',       'Ajouter / modifier une clé API + choisir le modèle'],
     ['/file <path>',   'Charger un fichier dans le contexte'],
     ['/project <dir>', 'Charger tout un répertoire projet'],
     ['/unfile',        'Retirer les fichiers du contexte'],
@@ -464,15 +454,59 @@ function printHelp() {
 }
 
 // ══════════════════════════════════════════════════════
-// PROMPT ANIMÉ
+// PROMPT CHAT — DEUX LIGNES HORIZONTALES
 // ══════════════════════════════════════════════════════
 function getPrompt(cfg, provider, model, loadedFiles, sessionId) {
-  const modelShort = model.split('/').pop() ?? model;
-  const filesTag   = loadedFiles.length ? ` ${A.yellow}[${loadedFiles.length}f]${A.reset}` : '';
-  const sessTag    = sessionId ? ` ${A.dim}·${A.reset}` : '';
-  return (
-    `\n  ${A.bold}${A.brightCyan}❯${A.reset} `
-  );
+  const w   = Math.min(W() - 4, 76);
+  const bar = `${A.dim}${A.cyan}${'━'.repeat(w)}${A.reset}`;
+  const tag = loadedFiles.length ? `  ${A.dim}[${loadedFiles.length} fichier(s)]${A.reset}` : '';
+  return `\n  ${bar}${tag}\n  `;
+}
+
+function closeInputBox() {
+  const w   = Math.min(W() - 4, 76);
+  const bar = `${A.dim}${A.cyan}${'━'.repeat(w)}${A.reset}`;
+  process.stdout.write(`\n  ${bar}\n`);
+}
+
+// ══════════════════════════════════════════════════════
+// CHAMP DE SAISIE — DEUX LIGNES HORIZONTALES
+// ══════════════════════════════════════════════════════
+
+function makeBoxedAsk(rl) {
+  return function boxedAsk(label, { secret = false, hint = '' } = {}) {
+    return new Promise(resolve => {
+      const w   = Math.min(W() - 4, 76);
+      const bar = `${A.dim}${A.cyan}${'━'.repeat(w)}${A.reset}`;
+      const lbl = label ? `  ${A.bold}${A.brightCyan}${label}${A.reset}\n` : '';
+
+      process.stdout.write(`\n${lbl}  ${bar}\n  `);
+      if (hint) process.stdout.write(`${A.dim}${hint}  ${A.reset}`);
+
+      rl.question('', answer => {
+        process.stdout.write(`  ${bar}\n`);
+        resolve(answer);
+      });
+    });
+  };
+}
+
+function makeBoxedConfirm(rl) {
+  return function boxedConfirm(label) {
+    return new Promise(resolve => {
+      const w   = Math.min(W() - 4, 76);
+      const bar = `${A.dim}${A.cyan}${'━'.repeat(w)}${A.reset}`;
+      const lbl = label ? `  ${A.bold}${A.brightYellow}${label}${A.reset}  ${A.dim}(y/n)${A.reset}\n` : '';
+
+      process.stdout.write(`\n${lbl}  ${bar}\n  `);
+
+      rl.question('', ans => {
+        const yes = ans.trim().toLowerCase() === 'y' || ans.trim().toLowerCase() === 'yes';
+        process.stdout.write(`  ${bar}\n`);
+        resolve(yes);
+      });
+    });
+  };
 }
 
 // ══════════════════════════════════════════════════════
@@ -506,10 +540,33 @@ async function sendMessage(userText, rl) {
     ? '\n\n' + formatFilesForContext(loadedFiles)
     : '';
 
-  const sysPrompt = `Tu es KIGHMU AI, un assistant expert en développement logiciel (Android, VPN, Node.js, Linux).
-Tu fonctionnes dans un terminal. Réponds de façon précise, concise et code-ready.
+  // Détecter si un token GitHub a été fourni dans cette session
+  const ghTokenMsg = messages.find(m =>
+    m.role === 'user' && /ghp_[a-zA-Z0-9]+|github_pat_[a-zA-Z0-9_]+/.test(m.content)
+  );
+  const ghTokenHint = ghTokenMsg
+    ? `\n\nToken GitHub détecté dans la conversation : utilise-le directement avec curl ou git pour cloner, lire ou modifier des dépôts. Exemple : curl -H "Authorization: token TOKEN" https://api.github.com/repos/USER/REPO/contents/`
+    : '';
+
+  const vpsInfo = (() => {
+    try {
+      const hostname = os.hostname();
+      const platform = os.platform();
+      const arch     = os.arch();
+      const release  = os.release();
+      const totalMem = Math.round(os.totalmem() / 1024 / 1024 / 1024);
+      const cwd      = process.cwd();
+      const nodeVer  = process.version;
+      return `\n\nENVIRONNEMENT SERVEUR (VPS):\n- Hôte: ${hostname} | OS: ${platform} ${release} ${arch}\n- RAM: ${totalMem} Go | CWD: ${cwd}\n- Node.js: ${nodeVer}\n- Tu as accès shell complet via /run et execSync. Tu PEUX exécuter des commandes, cloner des dépôts, lire des fichiers, installer des packages.`;
+    } catch { return ''; }
+  })();
+
+  const sysPrompt = `Tu es KIGHMU AI, un assistant expert en développement logiciel (Android, VPN, Node.js, Linux, DevOps).
+Tu fonctionnes sur un VPS Linux avec un environnement de travail complet adapté au coding.
+Tu as accès shell complet : tu PEUX et DOIS utiliser /run pour exécuter des commandes, analyser des fichiers, utiliser git, curl, npm, etc.
+Ne dis JAMAIS que tu ne peux pas exécuter des commandes ou accéder à des fichiers — utilise /run.
 Génère du code COMPLET. Ne tronque jamais. Commente le code important.
-Réponds dans la langue de l'utilisateur.` + filesCtx;
+Réponds dans la langue de l'utilisateur.${vpsInfo}${ghTokenHint}` + filesCtx;
 
   const contextMessages = [
     { role: 'system', content: sysPrompt },
@@ -526,32 +583,25 @@ Réponds dans la langue de l'utilisateur.` + filesCtx;
   // ── Streaming ────────────────────────────────────────
   if (streamOn && provider.stream) {
     printAIHeader(activeProvider, activeModel);
+    // Ouvrir la première ligne de contenu
     process.stdout.write('  ' + A.dim + A.cyan + '│' + A.reset + '  ');
 
     let fullReply = '';
     const startTime = Date.now();
-    let lineLen = 0;
-    const maxLineLen = W() - 6;
 
     try {
       for await (const delta of provider.stream(apiKey, activeModel, contextMessages, opts)) {
         fullReply += delta;
-        // Affichage avec wrap basique
+        // Afficher le delta brut — le rendu final se fait après
         const parts = delta.split('\n');
         for (let i = 0; i < parts.length; i++) {
           if (i > 0) {
             process.stdout.write('\n  ' + A.dim + A.cyan + '│' + A.reset + '  ');
-            lineLen = 0;
           }
           process.stdout.write(A.brightWhite + parts[i] + A.reset);
-          lineLen += parts[i].length;
-          // Wrap si ligne trop longue
-          if (lineLen > maxLineLen && parts[i].length > 0) {
-            process.stdout.write('\n  ' + A.dim + A.cyan + '│' + A.reset + '  ');
-            lineLen = 0;
-          }
         }
       }
+      // Fermer le bloc proprement après réception complète
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const tokens  = Math.round(fullReply.length / 4);
       printAIFooter(elapsed, tokens);
@@ -815,6 +865,137 @@ async function handleCommand(input, rl) {
       break;
     }
 
+    // ── Gestion des clés API ────────────────────────────
+    case '/cle-api': case '/key': case '/apikey': case '/keys': {
+      const w2 = W();
+      const ask       = makeBoxedAsk(rl);
+      const askSecret = (q) => makeBoxedAsk(rl)(q, { secret: true });
+      const confirm   = makeBoxedConfirm(rl);
+
+      process.stdout.write('\n' + c.dim('─'.repeat(w2)) + '\n');
+      process.stdout.write(`  ${c.title('GESTION DES CLÉS API & MODÈLES')}\n\n`);
+
+      // ── Afficher l'état actuel ──────────────────────
+      process.stdout.write(`  ${c.warn('ÉTAT ACTUEL')}\n\n`);
+      const providerLabels = {
+        mistral:    `${A.bold}${A.yellow}Mistral AI${A.reset}`,
+        groq:       `${A.bold}${A.brightGreen}Groq${A.reset}`,
+        openrouter: `${A.bold}${A.brightMagenta}OpenRouter${A.reset}`,
+      };
+      const providerUrls = {
+        mistral:    'console.mistral.ai/api-keys',
+        groq:       'console.groq.com/keys',
+        openrouter: 'openrouter.ai/keys',
+      };
+      Object.keys(PROVIDERS).forEach((p, i) => {
+        const existing = cfg.keys?.[p];
+        const masked   = existing
+          ? c.success('✓ ') + existing.slice(0, 6) + '••••••••' + existing.slice(-4)
+          : c.error('✗ non configurée');
+        const isActive = p === activeProvider ? c.model('  ← actif') : '';
+        process.stdout.write(
+          `  ${A.dim}${String(i+1)}.${A.reset}  ${(providerLabels[p] || p).padEnd?.(30) || providerLabels[p] || p}  ${masked}${isActive}\n`
+        );
+      });
+
+      process.stdout.write('\n');
+      const provList = Object.keys(PROVIDERS);
+
+      // ── Choisir le provider ─────────────────────────
+      const pChoice = await ask(`Provider à configurer (${provList.map((p,i)=>`${i+1}=${p}`).join(' | ')}) [Entrée pour annuler] :`);
+      if (!pChoice.trim()) {
+        process.stdout.write(`\n  ${c.dim('Annulé.')}\n`);
+        break;
+      }
+      const pIdx = parseInt(pChoice.trim()) - 1;
+      const chosenProvider = (!isNaN(pIdx) && pIdx >= 0 && pIdx < provList.length)
+        ? provList[pIdx]
+        : provList.find(p => p.toLowerCase().startsWith(pChoice.trim().toLowerCase()));
+
+      if (!chosenProvider) {
+        process.stdout.write(`\n  ${c.error('Provider invalide.')}\n`);
+        break;
+      }
+
+      process.stdout.write(`\n  ${c.dim('→ Obtenir une clé : ')}${A.underline}${A.dim}${providerUrls[chosenProvider] || ''}${A.reset}\n`);
+      const existingKey = cfg.keys?.[chosenProvider];
+      if (existingKey) {
+        const masked = existingKey.slice(0,6) + '••••••••' + existingKey.slice(-4);
+        process.stdout.write(`  ${c.dim('Clé actuelle : ')}${masked}\n`);
+      }
+
+      const newKey = await askSecret(`Nouvelle clé API ${chosenProvider} [Entrée pour garder l'existante]`);
+      if (newKey.trim()) {
+        if (!cfg.keys) cfg.keys = {};
+        cfg.keys[chosenProvider] = newKey.trim();
+        saveConfig(cfg);
+        process.stdout.write(`\n  ${c.success(`✓ Clé ${chosenProvider} mise à jour.`)}\n`);
+      } else {
+        process.stdout.write(`\n  ${c.dim('Clé inchangée.')}\n`);
+      }
+
+      // ── Choisir le modèle par défaut pour ce provider ──
+      const pModels = PROVIDERS[chosenProvider]?.models || [];
+      if (pModels.length) {
+        process.stdout.write(`\n  ${c.warn(`MODÈLES DISPONIBLES — ${chosenProvider.toUpperCase()}`)}\n\n`);
+        pModels.forEach((m, i) => {
+          const isCurrent = m.id === (chosenProvider === activeProvider ? activeModel : cfg.providerDefaults?.[chosenProvider]);
+          const tag = isCurrent ? c.model('  ← actif') : '';
+          process.stdout.write(
+            `  ${A.dim}${String(i+1).padStart(2)}.${A.reset}  ` +
+            `${A.bold}${m.id.split('/').pop().padEnd(42)}${A.reset}` +
+            `${A.dim}${m.name}${A.reset}${tag}\n`
+          );
+        });
+
+        const mChoice = await ask(`Modèle par défaut (numéro ou id) [Entrée pour garder l'actuel] :`);
+        if (mChoice.trim()) {
+          const mIdx = parseInt(mChoice.trim()) - 1;
+          let chosen = null;
+          if (!isNaN(mIdx) && mIdx >= 0 && mIdx < pModels.length) {
+            chosen = pModels[mIdx].id;
+          } else {
+            const found = pModels.find(m => m.id === mChoice.trim() || m.id.includes(mChoice.trim()));
+            if (found) chosen = found.id;
+          }
+          if (chosen) {
+            if (!cfg.providerDefaults) cfg.providerDefaults = {};
+            cfg.providerDefaults[chosenProvider] = chosen;
+            saveConfig(cfg);
+            // Appliquer immédiatement si c'est le provider actif
+            if (chosenProvider === activeProvider) {
+              activeModel = chosen;
+              process.stdout.write(`\n  ${c.success(`✓ Modèle → ${chosen} (actif immédiatement)`)}\n`);
+              printShortHeader(activeProvider, activeModel);
+            } else {
+              process.stdout.write(`\n  ${c.success(`✓ Modèle par défaut ${chosenProvider} → ${chosen}`)}\n`);
+            }
+          } else {
+            process.stdout.write(`\n  ${c.error('Modèle non trouvé.')}\n`);
+          }
+        } else {
+          process.stdout.write(`\n  ${c.dim('Modèle inchangé.')}\n`);
+        }
+      }
+
+      // ── Définir comme provider par défaut ? ────────
+      if (chosenProvider !== activeProvider && cfg.keys?.[chosenProvider]) {
+        const setDefault = await confirm(`Définir ${chosenProvider} comme provider actif ?`);
+        if (setDefault.trim().toLowerCase() === 'y') {
+          activeProvider = chosenProvider;
+          activeModel    = cfg.providerDefaults?.[chosenProvider] || PROVIDERS[chosenProvider].models[0].id;
+          cfg.defaultProvider = activeProvider;
+          cfg.defaultModel    = activeModel;
+          saveConfig(cfg);
+          process.stdout.write(`\n  ${c.success(`✓ Provider actif → ${activeProvider} | Modèle → ${activeModel}`)}\n`);
+          printShortHeader(activeProvider, activeModel);
+        }
+      }
+
+      process.stdout.write('\n' + c.dim('─'.repeat(w2)) + '\n\n');
+      break;
+    }
+
     case '/exit': case '/quit': case '/q':
       process.stdout.write(`\n  ${c.dim('Au revoir. Données dans ~/.voanh/')}\n\n`);
       process.stdout.write(A.showCursor);
@@ -896,26 +1077,38 @@ async function main() {
   rl.on('line', async (input) => {
     const line = input;
 
-    // Mode multi-ligne
+    // Mode multi-ligne actif
     if (inMultiline) {
-      if (line.trim() === '\\\\end' || line.trim() === '\\end') {
+      if (line.trim() === '\\\\end' || line.trim() === '\\end' || line.trim() === '\\\\' ) {
         inMultiline = false;
         const full = mlBuffer.join('\n');
         mlBuffer = [];
+        closeInputBox();
         if (full.trim()) await sendMessage(full, rl);
       } else {
         mlBuffer.push(line);
-        process.stdout.write(`${A.dim}  ...${A.reset} `);
+        // Continuer dans le cadre ouvert
+        const w  = Math.min(W() - 4, 76);
+        process.stdout.write(`  ${A.dim}${A.green}│${A.reset}  `);
         return;
       }
       process.stdout.write(getPrompt(cfg, activeProvider, activeModel, loadedFiles, sessionId));
       return;
     }
 
+    // Entrée en mode multi-ligne si la ligne se termine par "\"
+    if (line.endsWith('\\') && !line.endsWith('\\\\')) {
+      inMultiline = true;
+      mlBuffer = [line.slice(0, -1)];
+      // Le cadre est déjà ouvert (getPrompt l'a ouvert), on continue dedans
+      process.stdout.write(`  ${A.dim}${A.green}│${A.reset}  `);
+      return;
+    }
+
+    // Activation explicite multi-ligne avec \\ seul
     if (line.trim() === '\\\\' || line.trim() === '\\') {
       inMultiline = true; mlBuffer = [];
-      process.stdout.write(`\n  ${c.info('Mode multi-ligne. \\\\end pour envoyer.')}\n`);
-      process.stdout.write(`${A.dim}  ...${A.reset} `);
+      process.stdout.write(`  ${A.dim}${A.green}│${A.reset}  `);
       return;
     }
 
@@ -923,6 +1116,9 @@ async function main() {
       process.stdout.write(getPrompt(cfg, activeProvider, activeModel, loadedFiles, sessionId));
       return;
     }
+
+    // Fermer le cadre de saisie AVANT de traiter
+    closeInputBox();
 
     if (line.trim().startsWith('/')) {
       await handleCommand(line.trim(), rl);
