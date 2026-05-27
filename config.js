@@ -4,9 +4,10 @@
 //       mémoire projets, tâches agents autonomes
 // ═══════════════════════════════════════════════════════
 
-import fs   from 'fs';
-import path from 'path';
-import os   from 'os';
+import fs     from 'fs';
+import path   from 'path';
+import os     from 'os';
+import crypto from 'crypto';
 
 export const CONFIG_DIR  = path.join(os.homedir(), '.voanh');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
