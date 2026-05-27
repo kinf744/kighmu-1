@@ -1,0 +1,27 @@
+{
+  "name": "kighmu-ai",
+  "version": "3.0.0",
+  "description": "KIGHMU AI \u2014 Terminal AI Chat (Mistral \u00b7 Groq \u00b7 OpenRouter)",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "kighmu-ai": "./ui.js",
+    "voanh": "./index.js",
+    "voanh-daemon": "./daemon.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "ui": "node ui.js",
+    "daemon": "node daemon.js"
+  },
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "node-fetch": "^3.3.2",
+    "ora": "^8.0.1",
+    "readline-sync": "^1.4.10",
+    "diff": "^5.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
